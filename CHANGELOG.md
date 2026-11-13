@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.4
+
+### Changed
+
+- **Updated for Melvor Idle 2 0.11.5 (alpha.2).**
+  - **Saves from 0.11.5 read again.** The game no longer saves levels, only XP, and each quest task has a new flag. With a 0.11.5 save the companion read no skills, quests, Agility techniques or hunting journal. It now works out each level from XP the way the game does: skills up to 120, Agility techniques up to their cap, journal entries up to 25. The formulas give the same levels older saves stored, and they add up to the total level the game saves.
+  - **Rune Packs** no longer need Runecrafting 70 or 95, only their Mastery Guild rank.
+  - **Agility Marks:** courses drop them at new rates. The Arena's charms and technique cheat sheets now cost Agility Marks in place of Arena Reward Tokens, and the charms no longer need a technique level.
+  - **Silted Oasis and Sea Cliffside** open once their quest is finished, not after its first step. The quests' fights moved to areas of their own, which plans leave out. Moonscarred Crater also needs the Silver Slayer Permit now.
+  - **Farming:** Compost gives +40% crops (was +20%), Super Compost +45% (was +40%).
+  - **Gear:** 60 pieces need lower levels, for example upgraded Mithril armour needs Defence 40 (was 43). The Ceedyr Cape's bonus now applies on a Slayer task, not in Slayer areas.
+  - **Drops:** burning Blessed Logs can give Blessed Fragments, Quiet Bend can give Rope, the Stone Mason gives more Clay, and Yellowtail Birds have a second rare species, the Dreamtail.
+  - **Prices:** jewellery, staves and wands sell for more, Feathers for less (1 GP, was 4). The Arena Entry Ticket costs 750 GP (was 1,000).
+  - **Shop:** four new combat utility items (Thorned Buckle, Sentinel Charm, Icy Strand, Mending Flesh, 25,000 GP each), plus basic arrows, javelins, boomerangs and Topaz Bolts.
+  - **Toolbelt:** Fireflies in a Jar (Farming) is used once per harvest, and Warped Cacti Water once per kill.
+  - The Stone Spear Head is gone, and new icons replace missing artwork.
+
+## 0.4.3
+
+### Fixed
+
+- **Plans craft long material chains instead of pickpocketing the bottom of them.** The planner only looked 3 steps deep for materials, and beyond that it only used sources that need nothing, which means pickpocketing. Hunting chains are longer: Thornback Lizard Spikes are hunted with Nets, Nets need Rope and String, String needs Flax. So a Beastcrafting goal sent you to the Craftsman for 40 String (437 pickpockets) and the Thug for Rope, while another step in the same goal crafted String anyway. It now looks 6 steps deep. For Beastcrafting 28 to 31 with an empty bank, the plan goes from about 3h 26m to 1h 16m.
+- **Materials for one recipe no longer count on the same bank twice.** Thornback Camo pieces use String, and so do the Nets their spikes are hunted with. Each was worked out as if it had all your String, so the plan made too little and you ran short part-way. Each material now comes out of what the others leave.
+- **Running short part-way through a goal gets you enough for the rest of it in one go.** The companion added a top-up before each step that ran out, so you made String three times for one goal. A top-up now covers every later step in that goal that uses the item.
+- **A goal never lists the same thing twice.** When the plan put the training you were already doing first in a goal, the shortfall check counted it before the goal's own stocking up. The training looked short, so it got a top-up of its own: "Make 20 Sapphire", added because you had less than expected, then the goal's "Make 56 more Sapphire" right after. Stocking up now counts first, as the page lists it. When you really are short, the goal's own step for that item does more ("20 more than planned") in place of a second step. It makes the extra the same way as that step, even if another way would now be quicker.
+
+  Training is one run per method too. A plan could leave a method for a short detour (a few of something better while your materials last) and come back to it: "Mithril 2H Crossbow × 75", "Mithril Spear × 30", "Mithril 2H Crossbow × 32". The runs now join, with the detour after them: "Mithril 2H Crossbow × 107", then "Mithril Spear × 30". It's the same actions and XP. This applies to plans and to each skill's training path.
+- **"Do this now" lists what the step uses**, for example "Uses 22 Rabbit Fur, 66 Leather and 66 String", so a step can't be mixed up with a similar-looking recipe in the game.
+- **Your measured speed no longer changes what each action uses.** Being a little slower than the estimate means fewer actions an hour, but the plan also counted more material per action (about 2% in one case). That made shortfall warnings come early and gathering steps a little too long.
+
+- **Heist tasks are timed by heists, not attempts.** The game only counts a heist once every stage is stolen, but the Mastery Guild plan counted each pickpocket attempt. At 11.5% success on the Forbidden Library's 10 stages, "Complete 10 Heists in Mage Tower" showed under a minute. It now shows about 1h 13m. These tasks now use the game's wording: "Complete 10 Heists" and "Steal from 300 NPCs" in place of "Pickpocket 10 Heists targets".
+- **Targets that can kill you aren't planned as if you could leave them running.** A failed pickpocket or Agility obstacle can hit for more than the HP where auto-eat tops you up, and then one hit can take you to 0. Dying stops the skill and can lose a toolbelt item. The companion now works this out from your Hitpoints, your auto-eat bonuses and the food picked for that skill. Anything that would kill you within 8 hours is handled like a risky fight:
+  - Mastery Guild plans leave it out. The skill page lists those tasks under "Left out", with their time if you eat by hand.
+  - Training plans pick something else.
+  - Method lists mark it "Could kill you" and don't call it the best. Its details say how big the hits are, when auto-eat eats, and the Hitpoints level from which it's safe.
+- **Item pages give your real chances and put the best source first.** The chances added in 0.4.2 were the game's base numbers, so thieving loot ignored your success chance: a Cursed Circlet from the Forbidden Library showed 1 in 237 attempts when at 11.5% success it's about 1 in 2,000. They also left out your bonuses, and "likeliest first" compared a hit with a steal attempt or a kill. Now every chance counts your success chance and bonuses (cooking counts burnt food too). Each source you can do says how many it gives you an hour, fights included.
+  - Sources are ordered: sure ways (the shop, upgrades, the Grain Mill), then what you can do now, most an hour first, then the rest.
+  - Anything that can kill you comes after the safe ones and is marked.
+  - A source you can't do yet says what it needs.
+
+  For Bird Nests, every tree you can cut (about 9.5 an hour) now comes before the Bandit Woodcutter (2.5 an hour, and it can kill you).
+- **Plan steps no longer say "until" a level you already have.** When your bank only has materials for part of a level, the plan uses them up and then moves to something else. That step gains no level, but it still said "Make Fire Battlewand × 16 more until Runecrafting 41" when you were already 41. It now says "for Runecrafting XP, until you run out of Fire Rune". Plans made before this update say "as far as your materials go". The skill page's training path says "at level 41" for these steps in place of "level 41 → 41".
+- **Hunting says what to tick in the game.** With no Butterfly Kit, the plan said "Hunt Green Butterfly" and counted on trapless hunting, but never said the game only does that with "Enable Trapless Hunting" ticked for that animal. The companion now reads each animal's settings from your save. Plan steps and method details say what's missing:
+  - tick "Enable Trapless Hunting" when the plan counts on it;
+  - tick "Use Bait?" when it counts on bait, since the game only uses bait with it ticked;
+  - select a trap you have, when none is selected or you've run out of the one that is.
+
+  An animal with trapless hunting ticked is now planned without traps, as the game hunts it.
+- **Trapless hunting checks your Agility techniques.** Butterflies can be hunted without a trap from a Hunting level once enough Agility techniques are high enough (2 at level 10 for the Green Butterfly). The companion didn't read that condition and assumed you had it. It now checks your technique levels from the save.
+
 ## 0.4.2
 
 ### Added

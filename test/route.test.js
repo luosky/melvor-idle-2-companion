@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { minEach, planTraining } from '../engine/advisor.js';
+import { minEach, obtainEach, planTraining, producerIndex } from '../engine/advisor.js';
 import { createGameData } from '../engine/gamedata.js';
 import { planRank, rankValue } from '../engine/mastery-plan.js';
 import { computeRates } from '../engine/rates.js';
 import { BASE_VALUE, unlockValue } from '../engine/route-goals.js';
-import { lockRoute, routeProgress } from '../engine/route-progress.js';
+import { describeStep, lockRoute, routeProgress } from '../engine/route-progress.js';
 import { planRoute, planUses } from '../engine/route.js';
 
 const gd = createGameData(JSON.parse(readFileSync(new URL('../data/companion-data.json', import.meta.url), 'utf8')));
@@ -38,6 +38,31 @@ test('training uses what the bank has before gathering more, then carries on wit
   assert.ok(plan.gatherHours > 0, 'and the rest is gathered');
   // One method per stretch between unlocks: never two steps of the same method in a row.
   for (let i = 1; i < plan.steps.length; i++) assert.notEqual(plan.steps[i].method.key, plan.steps[i - 1].method.key);
+});
+
+test('a training step cut short by a material says so, not "until" a level you already have', () => {
+  // At Runecrafting 41 with runes for 14 Fire Battlewands: those first, then Body Runes to 45.
+  const levels = { ...at(99), Runecrafting: 41 };
+  const xp = Object.fromEntries(Object.entries(levels).map(([k, l]) => [k, gd.xp.xpForLevel(l)]));
+  const bank = { 'MelvorBase:UnpoweredOrb': 85, 'MelvorBase:FireRune': 296, 'MelvorBase:ChaosRune': 469 };
+  const [wands, runes] = planTraining(gd, 'Runecrafting', levels, xp.Runecrafting, 45, { bank }).steps;
+  assert.equal(wands.method.key, 'Runecrafting/FireBattlewand');
+  assert.equal(wands.actions, Math.floor(296 / 20));
+  assert.deepEqual([wands.fromLevel, wands.toLevel, wands.limitedBy], [41, 41, 'MelvorBase:FireRune']);
+  assert.equal(runes.toLevel, 45);
+  assert.equal(runes.limitedBy, null);
+  // The route keeps it, and says it in words.
+  const leg = planRoute(gd, { levels, xp, bank }).legs[0];
+  assert.equal(leg.skill, 'Runecrafting', 'every other skill is maxed');
+  const locked = lockRoute({ legs: [leg] });
+  const p = routeProgress(gd, locked, { levels, xp, bank });
+  const lines = p.legs[0].steps.filter((st) => st.kind === 'train').map((st) => describeStep(gd, st));
+  assert.equal(lines[0], 'Make Fire Battlewand × 14 for Runecrafting XP, until you run out of Fire Rune');
+  assert.match(lines[1], /until Runecrafting 45$/);
+  // A plan kept from before steps knew their material.
+  const old = JSON.parse(JSON.stringify(locked));
+  delete old.legs[0].steps.find((st) => st.kind === 'train').limitedBy;
+  assert.match(describeStep(gd, routeProgress(gd, old, { levels, xp, bank }).legs[0].steps.find((st) => st.kind === 'train')), /for Runecrafting XP, as far as your materials go$/);
 });
 
 test('the route never counts on more than the bank holds plus what its own steps gather or make', () => {
@@ -169,6 +194,112 @@ test('a locked route gets you more of something you ran out of before the step t
   assert.equal(gone.step.item, 'MelvorBase:RawShrimp');
 });
 
+test('running short part-way through a goal gets you enough for the rest of it in one go', () => {
+  // Two runs of cooking shrimp in one goal, and no shrimp: one catch for both, not one before each.
+  const levels = at(30);
+  const xp = Object.fromEntries(gd.skills.map((s) => [s.id, gd.xp.xpForLevel(30)]));
+  const shrimp = gd.methodByKey.get('Cooking/Shrimp');
+  const r = computeRates(gd, shrimp, 30);
+  const xpEach = r.xpPerHour / r.cyclesPerHour;
+  const run = (after) => ({ kind: 'train', method: shrimp, actions: 100, hours: 100 / r.cyclesPerHour, xpGain: 100 * xpEach, xpAfter: xp.Cooking + after * xpEach, toLevel: 30, levelUps: [] });
+  const leg = { kind: 'unlock', skill: 'Cooking', from: 30, to: 31, unlocks: [], steps: [run(100), run(200)] };
+  const p = routeProgress(gd, lockRoute({ legs: [leg] }), { levels, xp, bank: {} });
+  const tops = p.legs[0].steps.filter((st) => st.topUp);
+  assert.equal(tops.length, 1, tops.map((t) => `${t.method.key} ${t.qty}`).join(', '));
+  assert.equal(tops[0].item, 'MelvorBase:RawShrimp');
+  assert.ok(tops[0].qty >= 200 - 1e-6, `catches ${tops[0].qty}`);
+  assert.ok(!p.legs[0].steps.at(-1).short, 'the second run is covered');
+  assert.equal(p.short, null);
+});
+
+test('a goal never lists the same thing twice: its own step for an item does more instead of a top-up', () => {
+  // Cooking shrimp came first in the plan (you were doing it), then catching 50 shrimp. Stocking up
+  // counts first, as the page lists it; with none in the bank, the catch grows to 100.
+  const levels = at(30);
+  const xp = Object.fromEntries(gd.skills.map((s) => [s.id, gd.xp.xpForLevel(30)]));
+  const RAW = 'MelvorBase:RawShrimp';
+  const cook = gd.methodByKey.get('Cooking/Shrimp');
+  const r = computeRates(gd, cook, 30);
+  const xpEach = r.xpPerHour / r.cyclesPerHour;
+  const fish = obtainEach(producerIndex(gd, levels), new Map(), [{ item: RAW, qty: 50 }])[0];
+  const train = { kind: 'train', method: cook, actions: 100, hours: 100 / r.cyclesPerHour, xpGain: 100 * xpEach, xpAfter: xp.Cooking + 100 * xpEach, toLevel: 30, levelUps: [] };
+  // Planned with 50 in the bank: catch 50 more, to have 100.
+  const gather = (method = fish.method) => ({ kind: 'gather', method, item: RAW, actions: fish.actions, hours: fish.runHours, qty: 50, target: 100, xpGain: 0, xpAfter: 0, levelUps: [] });
+  const run = (bank, method) => routeProgress(gd, lockRoute({ legs: [{ kind: 'unlock', skill: 'Cooking', from: 30, to: 31, unlocks: [], steps: [train, gather(method)] }] }), { levels, xp, bank, current: cook.key }).legs[0].steps;
+  // The 50 you'll catch and the 50 you have cover it: no extra. (Counted in the order the plan has them,
+  // the cooking would have looked short and got a catching step of its own.)
+  const enough = run({ [RAW]: 50 });
+  assert.equal(enough.length, 2);
+  assert.ok(!enough.some((st) => st.topUp || st.extra || st.short));
+  // None in the bank (you used them on something else): one catching step for all 100.
+  const steps = run({});
+  assert.equal(steps.filter((st) => st.item === RAW).length, 1, steps.map((st) => `${st.method.key} ${st.item}`).join(', '));
+  const one = steps.find((st) => st.item === RAW);
+  assert.ok(one.left.qty >= 100 - 1e-6, `catches ${one.left.qty}`);
+  close(one.extra, one.left.qty - 50);
+  assert.ok(!steps.some((st) => st.topUp));
+  // Planned at a slower spot than the quickest one now: the extra still goes on that step, caught there.
+  const calm = gd.methodByKey.get('Fishing/CalmShallows');
+  assert.notEqual(calm.key, fish.method.key);
+  const slow = run({}, calm);
+  assert.deepEqual(slow.filter((st) => st.item === RAW).map((st) => st.method.key), [calm.key]);
+  assert.ok(slow.find((st) => st.item === RAW).extra > 0);
+});
+
+test('a plan does each training method in one run, not split around a detour', () => {
+  // 20 of everything: a few of something better while it lasts, then the main method. Before, Maple Bows
+  // came in two runs with Adamant Crossbows between them.
+  const bank = Object.fromEntries(Object.keys(gd.items).map((id) => [id, 20]));
+  const levels = { ...at(70), Fletching: 55 };
+  const xp = { ...Object.fromEntries(gd.skills.map((s) => [s.id, gd.xp.xpForLevel(70)])), Fletching: gd.xp.xpForLevel(55) };
+  const plan = planTraining(gd, 'Fletching', levels, xp.Fletching, 59, { bank });
+  const keys = plan.steps.map((st) => st.method.key);
+  assert.ok(keys.includes('Fletching/MapleBow'));
+  assert.equal(new Set(keys).size, keys.length, keys.join(' > '));
+  // Levels follow the new order, and every method still comes after the level it needs.
+  let level = 55;
+  for (const st of plan.steps) {
+    assert.equal(st.fromLevel, level);
+    assert.ok(st.method.level <= st.fromLevel, `${st.method.key} needs ${st.method.level}`);
+    assert.ok(st.toLevel >= st.fromLevel);
+    level = st.toLevel;
+  }
+  assert.equal(level, 59);
+  // The same in a whole route, where goals in one skill join into one leg.
+  const route = planRoute(gd, { levels, xp, bank });
+  for (const leg of route.legs) {
+    const runs = leg.steps.filter((st) => st.kind === 'train').map((st) => st.method.key);
+    assert.equal(new Set(runs).size, runs.length, `${leg.skill}: ${runs.join(' > ')}`);
+    const last = leg.steps.filter((st) => st.kind === 'train').at(-1);
+    if (leg.kind === 'unlock' && last) assert.equal(last.toLevel, leg.to);
+  }
+});
+
+test('materials for one recipe share the bank: two that need the same item can not both count on it', () => {
+  const index = producerIndex(gd, at(50));
+  const stock = new Map([['MelvorBase:String', 100]]);
+  const [a, b] = obtainEach(index, stock, [{ item: 'MelvorBase:String', qty: 80 }, { item: 'MelvorBase:String', qty: 80 }]);
+  assert.equal(a.short, 0);
+  close(b.short, 60);
+  assert.equal(stock.get('MelvorBase:String'), 100, 'the bank itself is left alone');
+});
+
+test('long material chains are crafted, not pickpocketed: Thornback Camo needs spikes, Nets, Rope and String', () => {
+  // Spikes are hunted with Nets, Nets are made from Rope and String, String from Flax. With none of it in
+  // the bank, every String and Rope comes from Crafting, not hundreds of Craftsman or Thug pickpockets
+  // (Wool for the Rope still comes from the Crafting Stall: nothing else gives it).
+  const levels = { ...at(60), Beastcrafting: 28 };
+  const bank = { 'MelvorBase:Leather': 400, 'MelvorBase:Feathers': 64 };
+  const plan = planTraining(gd, 'Beastcrafting', levels, gd.xp.xpForLevel(28), 31, { bank });
+  assert.ok(Number.isFinite(plan.hours));
+  const all = plan.steps.flatMap((st) => st.gather.flatMap((g) => [...g.needs, g]));
+  const ways = (item) => new Set(all.filter((n) => n.item === item).map((n) => n.method?.key));
+  assert.ok(all.some((n) => n.item === 'MelvorBase:ThornbackLizardSpike'), 'a camo piece with spikes is in the plan');
+  assert.deepEqual([...ways('MelvorBase:String')], ['Crafting/String']);
+  for (const key of ways('MelvorBase:Rope')) assert.equal(gd.methodByKey.get(key).skill, 'Crafting');
+  assert.ok(ways('MelvorBase:Rope').size > 0, 'Rope for the Nets is in the chain');
+});
+
 test('a locked route ticks steps off by itself, in whatever order you do them', () => {
   const levels = at(25);
   const xp = Object.fromEntries(gd.skills.map((s) => [s.id, gd.xp.xpForLevel(25)]));
@@ -244,6 +375,9 @@ test('plans use your measured speed: half as fast takes twice as long, and the t
   const locked = lockRoute({ legs: [{ kind: 'unlock', skill: 'Woodcutting', from: 10, to: 15, unlocks: [], steps: [{ kind: 'train', method: gd.methodByKey.get(key), actions: slow.steps[0].actions, hours: slow.hours, xpAfter: gd.xp.xpForLevel(15), xpGain: gd.xp.xpForLevel(15) - xp.Woodcutting, toLevel: 15, levelUps: [] }] }] }, { speed: { [key]: 0.5 } });
   const p = routeProgress(gd, locked, { levels, xp, bank: {} });
   close(p.step.left.hours, slow.hours, 0.02);
+  // Slower means fewer actions an hour, not more logs from each one.
+  const r = computeRates(gd, gd.methodByKey.get(key), 10);
+  for (const [item, each] of p.step.makes) close(each, r.outputs.find((o) => o.item === item).perHour / r.cyclesPerHour);
 });
 
 test('the plan warns when what it brings in will not fit in your bank', () => {

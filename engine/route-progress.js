@@ -36,6 +36,7 @@ export function lockRoute(route, { madeAt = Date.now(), speed = null } = {}) {
         xpAfter: st.xpAfter,
         xpGain: st.xpGain,
         toLevel: st.toLevel ?? null,
+        limitedBy: st.limitedBy ?? null,
         lasts: Number.isFinite(st.lasts) ? st.lasts : null,
         levelUps: st.levelUps ?? [],
         task: st.task ?? null,
@@ -86,13 +87,14 @@ export function routeProgress(gd, locked, { levels, xp, bank, current = null, ma
         const actions = xpEach > 0 ? Math.ceil(xpLeft / xpEach - 0.5) : 0;
         left = { actions: Math.max(0, actions), qty: null, hours: Math.max(0, actions) / rates.cyclesPerHour };
       } else {
-        const each = (rates.outputs.find((o) => o.item === saved.item)?.perHour ?? 0) / rates.cyclesPerHour;
+        const each = (base.outputs.find((o) => o.item === saved.item)?.perHour ?? 0) / base.cyclesPerHour;
         const qty = Math.min(saved.qty ?? Infinity, Math.max(0, saved.target - (bank[saved.item] ?? 0)));
         const actions = each > 0 ? Math.ceil(qty / each - 0.5) : 0;
         left = { actions: Math.max(0, actions), qty, hours: Math.max(0, actions) / rates.cyclesPerHour };
       }
-      const uses = new Map(rates.inputs.map((i) => [i.item, i.perHour / rates.cyclesPerHour]));
-      const makes = new Map(rates.outputs.map((o) => [o.item, o.perHour / rates.cyclesPerHour]));
+      // Per action: your speed changes how many actions an hour, not what each one uses or makes.
+      const uses = new Map(base.inputs.map((i) => [i.item, i.perHour / base.cyclesPerHour]));
+      const makes = new Map(base.outputs.map((o) => [o.item, o.perHour / base.cyclesPerHour]));
       return { ...saved, method, left, fromBank: left, uses, makes, levelUps: saved.levelUps };
     });
     return { ...leg, unlocks: leg.unlocks.map((k) => gd.methodByKey.get(k)).filter(Boolean), steps };
@@ -144,19 +146,27 @@ export function routeProgress(gd, locked, { levels, xp, bank, current = null, ma
     return computeRates(gd, st.method, gd.levelOf(levels, st.method.skill)).inputs.find((i) => (bank[i.item] ?? 0) < minEach(st.method, i.item))?.item ?? null;
   };
   for (const leg of legs) for (const st of leg.steps) st.done = done.has(st.id);
-  // Every step still to do, in order, against your bank as the steps before it will leave it (what they
-  // make added, what they use taken away). A step that won't have what it needs, because you used it on
-  // something else, sold it, or had bad luck, is marked short. When something you can do now makes up the
-  // shortfall, top-up steps go in just before it and the plan carries on (they drop off once your bank
-  // covers it); only a shortfall nothing can make (`short`) means the plan no longer works.
+  // Every step still to do, in the order you'll do them, against your bank as the steps before it will
+  // leave it (what they make added, what they use taken away). A goal stocks up before it trains, as the
+  // page lists it, even when the training came first in the plan because you were already doing it; only
+  // stocking up that needs what the training makes waits for it. A step that won't have what it needs,
+  // because you used it on something else, sold it, or had bad luck, is marked short. When something you
+  // can do now makes up the shortfall, the goal's own step for that item does more (one step, not two for
+  // the same thing), or a top-up step goes in just before it; either way the plan carries on and the extra
+  // drops off once your bank covers it. Only a shortfall nothing can make (`short`) means the plan no
+  // longer works.
   let short = null;
   if (bank) {
     const stock = { ...bank };
     let index = null;
+    const trains = (st) => st.kind === 'train' || st.kind === 'task';
     for (const leg of legs) {
-      for (let i = 0; i < leg.steps.length; i++) {
-        const st = leg.steps[i];
-        if (st.done) continue;
+      const trainMakes = new Set(leg.steps.filter(trains).flatMap((st) => [...st.makes.keys()]));
+      const first = leg.steps.filter((st) => !trains(st) && ![...st.uses.keys()].some((i) => trainMakes.has(i)));
+      const order = [...first, ...leg.steps.filter((st) => !first.includes(st))];
+      const seen = new Set();
+      order.forEach((st, k) => {
+        if (st.done) return;
         for (const [item, each] of st.uses) {
           const need = each * st.left.actions;
           const have = Math.max(0, stock[item] ?? 0);
@@ -164,19 +174,34 @@ export function routeProgress(gd, locked, { levels, xp, bank, current = null, ma
           if (need - have >= each && !st.short) {
             st.short = { item, need: Math.ceil(need), have: Math.floor(have) };
             index ??= producerIndex(gd, levels);
-            const top = topUp(gd, index, stock, item, st.short.need - st.short.have, st.id);
+            // Enough for the rest of this goal in one go, not a top-up before every step that runs short:
+            // what the steps after it still use, less what they make.
+            const ahead = order.slice(k + 1).filter((x) => !x.done).reduce((sum, x) => sum + ((x.uses.get(item) ?? 0) - (x.makes.get(item) ?? 0)) * x.left.actions, 0);
+            const qty = st.short.need - st.short.have + Math.max(0, Math.ceil(ahead - 1e-9));
+            // The goal's own step for the item, already counted above, makes the extra the same way.
+            const own = leg.steps.find((x) => seen.has(x) && !x.done && !x.topUp && x.item === item && x.kind !== 'train' && x.kind !== 'task');
+            const top = topUp(gd, index, stock, item, qty, st.id, own?.method.key);
             if (top) {
               st.short.topUp = true;
-              leg.steps.splice(i, 0, ...top.steps);
-              i += top.steps.length;
+              const extra = [];
+              for (const part of top.steps) {
+                // The same thing already lined up in this goal (and counted above): it does more instead.
+                const twin = leg.steps.find((x) => seen.has(x) && !x.done && !x.topUp && x.method.key === part.method.key && x.item === part.item);
+                if (twin) {
+                  twin.left = { actions: twin.left.actions + part.actions, qty: (twin.left.qty ?? 0) + part.qty, hours: twin.left.hours + part.hours };
+                  twin.extra = (twin.extra ?? 0) + part.qty;
+                } else extra.push(part);
+              }
+              leg.steps.splice(leg.steps.indexOf(st), 0, ...extra);
               for (const u of top.uses) stock[u.item] = (stock[u.item] ?? 0) - u.qty;
-              stock[item] = have + (st.short.need - st.short.have);
+              stock[item] = have + qty;
             } else short ??= { step: st.id, ...st.short };
           }
           stock[item] = (stock[item] ?? 0) - need;
         }
         for (const [item, each] of st.makes) stock[item] = (stock[item] ?? 0) + each * st.left.actions;
-      }
+        seen.add(st);
+      });
     }
   }
   let at = 0;
@@ -219,11 +244,13 @@ export function routeProgress(gd, locked, { levels, xp, bank, current = null, ma
 
 // Steps that make up a shortfall of `qty` with what you can do now, deepest materials first (obtain()),
 // from `stock` as the plan will have it then, not counting what's left of the item itself (the step
-// short of it already counts on that). Null when nothing you can do makes it.
-function topUp(gd, index, stock, item, qty, forStep) {
+// short of it already counts on that). `way`: the method to make the item itself with (the one the goal
+// already uses for it), when you can do it now. Null when nothing you can do makes it.
+function topUp(gd, index, stock, item, qty, forStep, way = null) {
   const pool = new Map(Object.entries(stock).map(([k, v]) => [k, Math.max(0, v)]));
   pool.set(item, 0);
-  const got = obtain(index, pool, item, qty);
+  const only = way && (index.get(item) ?? []).filter((p) => p.rates.method.key === way);
+  const got = obtain(only?.length ? new Map([...index, [item, only]]) : index, pool, item, qty);
   if (!got.method || !Number.isFinite(got.hours)) return null;
   const parts = [...got.needs, { item, qty: got.short, method: got.method, makes: got.makes, actions: got.actions, hours: got.runHours }];
   if (parts.some((p) => !p.method || !p.actions)) return null;
@@ -239,11 +266,20 @@ function topUp(gd, index, stock, item, qty, forStep) {
 export const STEP_VERBS = { woodcutting: 'Cut', mining: 'Mine', fishing: 'Catch', cooking: 'Cook', firemaking: 'Burn', artisan: 'Make', thieving: 'Steal from', agility: 'Do', astrology: 'Study', hunting: 'Hunt', farming: 'Grow', ranching: 'Raise' };
 export const GATHER_VERBS = { woodcutting: 'Cut', mining: 'Mine', fishing: 'Catch', cooking: 'Cook', artisan: 'Make', hunting: 'Hunt', farming: 'Grow' };
 
+// Where a training step stops. Most get you to a level ("until Runecrafting 45"); one the plan cut short
+// where a material in your bank runs out, then moves on to something else, gains no level, so it says
+// what it's for and what runs out. `item` and `skill` render the names (plain text, or a link and escaped
+// HTML). Old plans didn't keep the material: they say it's as far as your materials go.
+export function trainEnd(gd, st, { item = (id) => gd.itemName(id), skill = gd.skillName(st.method.skill) } = {}) {
+  if (st.levelUps?.length || st.toLevel == null) return `until ${skill} ${st.toLevel}`;
+  return `for ${skill} XP, ${st.limitedBy ? `until you run out of ${item(st.limitedBy)}` : 'as far as your materials go'}`;
+}
+
 // A step in plain words, with what's still to do when `left` says so: for notifications and titles.
 export function describeStep(gd, st, { left = true } = {}) {
   const todo = left && !st.done && st.left ? st.left : null;
   const n = (x) => Math.ceil(x).toLocaleString('en-US');
   if (st.kind === 'task') return `${st.task.label}${todo?.progress != null ? ` (${n(todo.progress)}/${n(st.task.of)})` : ''}`;
-  if (st.kind === 'train') return `${STEP_VERBS[st.method.kind] ?? 'Do'} ${st.method.name} × ${n(todo ? todo.actions : st.actions)} until ${gd.skillName(st.method.skill)} ${st.toLevel}`;
+  if (st.kind === 'train') return `${STEP_VERBS[st.method.kind] ?? 'Do'} ${st.method.name} × ${n(todo ? todo.actions : st.actions)} ${trainEnd(gd, st)}`;
   return `${GATHER_VERBS[st.method.kind] ?? 'Get'} ${n(todo?.qty ?? st.qty)} ${gd.itemName(st.item)}`;
 }

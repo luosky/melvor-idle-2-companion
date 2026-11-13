@@ -6,7 +6,7 @@ import { masteryStatus } from '/engine/mastery.js';
 import { ranchModel } from '/engine/ranch.js';
 import { STEP_VERBS } from '/engine/route-progress.js';
 import { badge, duration, esc, exact, iconImg, num, pct } from '/ui/format.js';
-import { masteryPlanFor, rankBonusText, taskLine } from './mastery-ui.js';
+import { handsOnTasks, masteryPlanFor, rankBonusText, taskLine } from './mastery-ui.js';
 import { card, gatherStep, itemLink, memo, methodIcon, methodLink, methodRows, pageHead, saveKey, skillName, stat, table } from './shared.js';
 
 const HOUR_MS = 3_600_000;
@@ -174,7 +174,7 @@ function masteryCard(ctx, skill) {
   return card(`Mastery Guild: ${esc(m.rank?.name ?? 'no rank yet')}`, `
     <div class="bar" role="progressbar" aria-label="Points towards the next rank" aria-valuenow="${Math.round(share * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(share * 100).toFixed(1)}%"></span></div>
     <p class="small">${exact(m.points)} of ${exact(m.total)} points from ${exact(m.done)} of ${exact(m.tasks)} tasks.${m.next ? ` <strong>${esc(m.next.name)}</strong> at ${exact(nextAt)} points (${exact(m.pointsToNext)} to go)${m.nextBonus ? `: ${esc(effects(m.nextBonus))}` : ''}.` : ' Top rank.'}</p>
-    ${have.length ? `<p class="small muted">Counted in the rates below: ${have.map((b) => `${esc(b.rankName)} (${esc(effects(b))})`).join('; ')}.</p>` : ''}${route}`, ' style="margin-bottom:12px"');
+    ${have.length ? `<p class="small muted">Counted in the rates below: ${have.map((b) => `${esc(b.rankName)} (${esc(effects(b))})`).join('; ')}.</p>` : ''}${route}${m.next ? handsOnTasks(ctx, plan) : ''}`, ' style="margin-bottom:12px"');
 }
 
 // ---------- Skills ----------
@@ -194,7 +194,7 @@ function pathCard(ctx, skill, planFor) {
   if (plan.blocked) return card(title, '<p class="muted">Nothing you can do yet gets there: a method on the way needs something you can&#39;t get.</p>');
   const rows = plan.steps.flatMap((st) => [
     ...st.gather.map((g) => `<li><span>First ${[...g.needs, g].map((n) => gatherStep(ctx, n)).join(', then ')}</span><span class="num">${duration(g.hours ?? 0)}</span></li>`),
-    `<li><span>${STEP_VERBS[st.method.kind] ?? 'Do'} ${methodLink(st.method)} × ${exact(Math.ceil(st.actions))} <span class="muted small">level ${st.fromLevel} → ${st.toLevel}</span></span><span class="num">${duration(st.hours)}</span></li>`,
+    `<li><span>${STEP_VERBS[st.method.kind] ?? 'Do'} ${methodLink(st.method)} × ${exact(Math.ceil(st.actions))} <span class="muted small">${st.toLevel > st.fromLevel ? `level ${st.fromLevel} → ${st.toLevel}` : `at level ${st.fromLevel}, ${st.limitedBy ? `until you run out of ${itemLink(ctx, st.limitedBy)}` : 'as far as your materials go'}`}</span></span><span class="num">${duration(st.hours)}</span></li>`,
   ]);
   const why = target === unlock ? `the next level that unlocks something new${planFor > now ? '' : '. Set "Level to plan for" below to plan further'}` : "the level you're planning for";
   return card(title, `<p class="small muted">About <strong>${duration(plan.hours)}</strong>${plan.gatherHours >= 1 / 60 ? ` (${duration(plan.trainHours)} training, ${duration(plan.gatherHours)} getting materials)` : ''} to ${why}. Uses what's in your bank, and changes method only when it's worth it.</p>

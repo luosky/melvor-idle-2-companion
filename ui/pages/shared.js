@@ -1,6 +1,8 @@
 // Pieces shared by every page: links, cards, tables, method rows.
 import { describeRequirement, GP } from '/engine/gamedata.js';
+import { idleDanger } from '/engine/idle-danger.js';
 import { thievingDrops, triesFor } from '/engine/lookup.js';
+import { huntingTodo } from '/engine/rates.js';
 import { duration, esc, exact, gp, iconImg, iconUrl, num, pct } from '/ui/format.js';
 
 export const enc = encodeURIComponent;
@@ -67,8 +69,43 @@ export const table = (head, rows, empty = 'Nothing to show.') =>
     ? `<div class="table-wrap"><table><thead><tr>${head.map((h) => `<th${h.startsWith('#') ? ' class="num"' : ''}>${esc(h.replace(/^#/, ''))}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`
     : `<p class="muted">${esc(empty)}</p>`;
 
+// Why a method that hurts you can kill you while it runs, and what makes it safe (from idleDanger).
+export function dangerText(ctx, d, skill) {
+  const every = Number.isFinite(d.hoursToDeath) ? `about once every ${duration(d.hoursToDeath)} left running` : 'eventually';
+  if (!d.food) {
+    return d.picked
+      ? `You're out of ${ctx.gd.itemName(d.picked)}, the food picked for ${skillName(ctx, skill)}, so nothing heals you: it kills you ${every}.`
+      : `No food is picked for ${skillName(ctx, skill)} in the game, so auto-eat can't heal you: it kills you ${every}.`;
+  }
+  const fix = d.safeLevel ? ` From Hitpoints level ${d.safeLevel}, auto-eat comes in time.` : '';
+  return `A failure hits for up to ${exact(d.biggestHit)}, but auto-eat waits until you're at ${exact(d.autoEatAt)} HP, so one hit can take you from ${exact(d.autoEatAt + 1)} to 0: ${every}. Dying stops ${skillName(ctx, skill)} and can lose one of its toolbelt items.${fix}`;
+}
+
+// What to set on a hunting animal's page in the game for the companion's numbers to hold, as a line of
+// HTML (empty when it's all set, or not a hunting method). A warning when the game won't hunt without
+// it (no trap selected, or trapless not ticked with no trap); bait only makes it quicker.
+export function huntingTodoNote(ctx, method) {
+  const todo = huntingTodo(ctx.gd, method);
+  if (!todo.length) return '';
+  const ticks = todo.filter((t) => t.kind !== 'trap').map((t) => (t.kind === 'trapless' ? '"Enable Trapless Hunting"' : '"Use Bait?"'));
+  const trap = todo.find((t) => t.kind === 'trap');
+  const what = [ticks.length ? `tick ${ticks.join(' and ')}` : '', trap ? `select ${itemLink(ctx, trap.item)} as its trap` : ''].filter(Boolean).join(' and ');
+  const why = todo.find((t) => t.kind === 'trapless') ? ' It needs no trap that way.' : '';
+  const blocking = todo.some((t) => t.kind !== 'bait');
+  return `<span class="sub small ${blocking ? 'warn-text' : 'accent-text'}">On its page in the game, ${what}.${why}</span>`;
+}
+
+// A warning pill for a method that can kill you while it runs.
+export function dangerPill(ctx, r) {
+  const d = idleDanger(ctx.gd, r);
+  if (!d?.risky) return '';
+  return `<span class="pill bad" title="${esc(dangerText(ctx, d, r.method.skill))}">Could kill you: ${Number.isFinite(d.hoursToDeath) ? `about every ${duration(d.hoursToDeath)}` : 'eat by hand'}</span>`;
+}
+
 function rateNotes(ctx, r) {
   const notes = [];
+  const pill = dangerPill(ctx, r);
+  if (pill) notes.push(pill);
   if (r.successChance != null && r.successChance < 1) notes.push(`${pct(r.successChance)} success`);
   if (r.food) notes.push(`eats ${num(r.food.perHour)} ${esc(ctx.gd.itemName(r.food.item))}/h`);
   if (r.note) notes.push(esc(r.note));
@@ -102,9 +139,12 @@ export function methodDetail(ctx, x) {
     extra = `<div><h4>Loot per attempt</h4>${li(drops.map((d) => `<li>${itemLink(ctx, d.item)} <span class="muted">${pct(d.chance * s, d.chance * s < 0.01 ? 2 : 1)} · ~${exact(triesFor(d.chance * s, 0.5))} tries for 50%</span></li>`))}</div>`;
   }
   const reqs = [...(x.missing ?? []), ...(x.unknown ?? []), ...(x.equip ?? [])];
+  const danger = idleDanger(gd, r);
   return `<div class="detail-body">
     <div><h4>Each action</h4><p>${(r.msPerCycle / 1000).toFixed(r.msPerCycle < 10000 ? 2 : 1)}s${r.note ? ` · ${esc(r.note)}` : ''}</p>
       ${r.successChance != null ? `<p>Success chance ${pct(r.successChance, 1)}</p>` : ''}
+      ${danger?.risky ? `<p class="small warn-text">${esc(dangerText(ctx, danger, m.skill))}</p>` : ''}
+      ${m.kind === 'hunting' ? `<p>${huntingTodoNote(ctx, m)}</p>` : ''}
       <p class="muted small">${num(r.cyclesPerHour)} per hour</p>
       ${reqs.length ? `<p class="small">Requires: ${requirementText(ctx, reqs)}</p>` : ''}</div>
     <div><h4>Gains per hour</h4>${li(gains)}</div>
@@ -114,7 +154,8 @@ export function methodDetail(ctx, x) {
 }
 
 export function methodRows(ctx, list, { columns = ['skill'], expandable = true, sustain = false, markBest = true } = {}) {
-  const bestIndex = list.findIndex((x) => x.ok !== false && !x.unknown?.length);
+  // The best one you can leave running.
+  const bestIndex = list.findIndex((x) => x.ok !== false && !x.unknown?.length && !idleDanger(ctx.gd, x.rates)?.risky);
   return list.flatMap((x, i) => {
     const r = x.rates;
     const m = r.method ?? x.method;

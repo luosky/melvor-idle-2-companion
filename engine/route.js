@@ -8,7 +8,7 @@
 // in the first goal that needs it, a skill at a time, before that goal trains. The goal you're working on
 // in the game stays first until it's done, and an earlier route's choices (`prefer`) keep winning unless
 // something is clearly better, so the route doesn't change under you with every autosave. Isomorphic.
-import { KEEP, obtain, planRates, planTraining, producerIndex, SWITCH_HOURS } from './advisor.js';
+import { KEEP, MATERIAL_DEPTH, obtain, planRates, planTraining, producerIndex, SWITCH_HOURS } from './advisor.js';
 import { computeRates } from './rates.js';
 import { baselineProfit, levelLockedShop, unlockValue } from './route-goals.js';
 
@@ -193,9 +193,13 @@ function settle(gd, legs, start) {
         st.target = stock.get(st.item) ?? 0;
       }
     }
+    const was = gd.levelOf(levels, skill);
     xp[skill] = (xp[skill] ?? 0) + st.xpGain;
-    levels[skill] = Math.max(gd.levelOf(levels, skill), Math.min(gd.levelCap, gd.xp.levelForXp(xp[skill], gd.levelCap)));
+    levels[skill] = Math.max(was, Math.min(gd.levelCap, gd.xp.levelForXp(xp[skill], gd.levelCap)));
     st.xpAfter = xp[skill];
+    // Levels as the steps now fall, after joining runs and stocking up first.
+    st.levelUps = levels[skill] > was ? [{ skill, level: levels[skill] }] : [];
+    if (st.kind === 'train') st.toLevel = levels[skill];
   }
 }
 
@@ -213,15 +217,17 @@ function itemsOf(gd, method) {
 // get them) for the whole route once, in the first goal that needs them. Things made from other things
 // stay with their own goal, next to what they're made from. Each goal then stocks up before it trains, a
 // skill at a time (all the mining, then all the smelting), starting with the step you're on in the game if
-// it's one of them. Training keeps its order.
+// it's one of them. Training keeps its order, one run per method in a goal: coming back to a method after
+// a detour (goals in one skill can do that between them) joins its first run, and the detour follows it.
 function batch(gd, legs, current) {
   const first = new Map();
   legs.forEach((leg, li) => {
     const kept = [];
     for (const st of leg.steps) {
-      const key = st.kind === 'train' ? null : `${st.method.key}|${st.item}`;
-      const into = key && first.get(key);
-      if (into && (into.leg === li || itemsOf(gd, st.method).uses.size === 0)) fold(into.step, st);
+      const train = st.kind === 'train';
+      const key = train ? `train|${st.method.key}` : `${st.method.key}|${st.item}`;
+      const into = first.get(key);
+      if (into && (into.leg === li || (!train && itemsOf(gd, st.method).uses.size === 0))) fold(into.step, st);
       else {
         if (key) first.set(key, { step: st, leg: li });
         kept.push(st);
@@ -284,6 +290,7 @@ function fold(into, st) {
   into.xpGain += st.xpGain;
   if (st.qty != null) into.qty = (into.qty ?? 0) + st.qty;
   if (st.toLevel != null) into.toLevel = st.toLevel;
+  if (st.kind === 'train') into.limitedBy = st.limitedBy ?? null;
   for (const up of st.levelUps) {
     const have = into.levelUps.find((u) => u.skill === up.skill);
     if (have) have.level = Math.max(have.level, up.level);
@@ -328,7 +335,7 @@ function extraCandidate(gd, sim, x, { index, last, prefer }) {
   if (x.kind === 'gear') {
     const plan = level < x.to ? planTraining(gd, x.skill, sim.levels, sim.xp[x.skill], x.to, { bank: sim.stock, index, current: last, prefer }) : null;
     if (plan?.blocked) return null;
-    const make = sim.stock ? obtain(index, sim.stock, x.item, 1, 3, prefer) : null;
+    const make = sim.stock ? obtain(index, sim.stock, x.item, 1, MATERIAL_DEPTH, prefer) : null;
     if (make && !Number.isFinite(make.hours)) return null;
     const chain = make ? [...make.needs, make] : [];
     return { ...x, from: level, plan, label: gd.itemName(x.item), hours: (plan?.hours ?? 0) + (make?.hours ?? 0),
@@ -374,7 +381,7 @@ function play(gd, sim, goal, clock, touched, index) {
         if (n.method && n.actions) run(n.makes ? 'make' : 'gather', n.method, n.actions, { item: n.item, qty: n.qty });
       }
     }
-    run('train', st.method, st.actions, { xp: st.xp, hours: st.hours, toLevel: st.toLevel });
+    run('train', st.method, st.actions, { xp: st.xp, hours: st.hours, toLevel: st.toLevel, limitedBy: st.limitedBy ?? null });
   }
   if (goal.kind === 'gear') {
     // Then make it: from the bank, gathering anything it's short of first.

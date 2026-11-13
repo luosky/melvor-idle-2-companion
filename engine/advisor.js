@@ -1,5 +1,6 @@
 // Recommendations built on top of the rate calculators. Isomorphic.
 import { GP } from './gamedata.js';
+import { idleDanger } from './idle-danger.js';
 import { computeRates, sustainHours } from './rates.js';
 import { rareOdds } from './rare-items.js';
 
@@ -115,11 +116,17 @@ export function producerIndex(gd, levels) {
   return index;
 }
 
+// How many steps deep a material chain can go. Hunting's are long: Rabbit Fur needs Snares, which need
+// Rope, which needs String, which needs Flax. Too short and the bottom of a chain can only come from
+// something that needs nothing (pickpocketing String from a Craftsman, hundreds of attempts for what
+// a few crafts make).
+export const MATERIAL_DEPTH = 6;
+
 // The quickest way to have `qty` of an item: bank stock first, then gathering or making the rest in
-// whole actions (up to three steps deep, e.g. mine ore -> smelt bars -> smith). Reads the stock; doesn't
+// whole actions (up to `depth` steps deep, e.g. mine ore -> smelt bars -> smith). Reads the stock; doesn't
 // change it. `needs` lists what has to be gathered or made before `method` can run, deepest first, each
 // with its own { actions, hours }; `actions` and `runHours` are this item's own step.
-export function obtain(index, stock, item, qty, depth = 3, prefer = null) {
+export function obtain(index, stock, item, qty, depth = MATERIAL_DEPTH, prefer = null) {
   const fromStock = Math.min(Math.max(0, stock.get(item) ?? 0), qty);
   const short = qty - fromStock;
   const uses = fromStock > 0 ? [{ item, qty: fromStock }] : [];
@@ -132,8 +139,8 @@ export function obtain(index, stock, item, qty, depth = 3, prefer = null) {
     let hours = run.hours;
     const subUses = [];
     const needs = [];
-    for (const i of p.rates.inputs) {
-      const sub = obtain(index, stock, i.item, inputFor(p.rates, i, run.actions), depth - 1, prefer);
+    const subs = obtainEach(index, stock, p.rates.inputs.map((i) => ({ item: i.item, qty: inputFor(p.rates, i, run.actions) })), depth - 1, prefer);
+    for (const sub of subs) {
       hours += sub.hours;
       subUses.push(...sub.uses);
       if (sub.short > 0) needs.push(...sub.needs, { item: sub.item, qty: sub.short, method: sub.method, makes: sub.makes, actions: sub.actions, hours: sub.runHours });
@@ -144,6 +151,21 @@ export function obtain(index, stock, item, qty, depth = 3, prefer = null) {
   }
   if (!best) return { item, short, hours: Infinity, method: null, uses, needs: [] };
   return { item, short, hours: best.hours, method: best.method, makes: best.makes, actions: best.run.actions, runHours: best.run.hours, made: best.made, uses: [...uses, ...best.uses], needs: best.needs };
+}
+
+// What's left of `stock` (anything with get()) once `taken` is spoken for.
+const remaining = (stock, taken) => ({ get: (k) => Math.max(0, (stock.get(k) ?? 0) - (taken.get(k) ?? 0)) });
+
+// obtain() for each of a recipe's materials in turn ([{ item, qty }]), each from what the ones before it
+// left in the bank: Thornback Camo Legs use String, and so do the Nets their spikes are hunted with, so
+// the two can't both count on the same String.
+export function obtainEach(index, stock, wants, depth = MATERIAL_DEPTH, prefer = null) {
+  const taken = new Map();
+  return wants.map(({ item, qty }) => {
+    const got = obtain(index, taken.size ? remaining(stock, taken) : stock, item, qty, depth, prefer);
+    for (const u of got.uses) taken.set(u.item, (taken.get(u.item) ?? 0) + u.qty);
+    return got;
+  });
 }
 
 // Rates for planning, worked out once per method, and per level only for methods that change with level
@@ -222,11 +244,12 @@ function pickMethod(gd, skill, levels, level, xp, until, stock, index, prev, pre
   };
   // Fastest first, so a good option turns up early and slower methods can be ruled out before working
   // out their materials (which only ever add time).
+  // Not what can kill you while it runs (a heist whose failures hit harder than auto-eat allows for).
   const options = [];
   for (const method of gd.methodsBySkill[skill] ?? []) {
     if (method.level > level || !usable(gd.checkRequirements(method, lv))) continue;
     const rates = ratesAt(gd, method, level);
-    if (rates.xpPerHour > 0) options.push({ method, rates });
+    if (rates.xpPerHour > 0 && !idleDanger(gd, rates)?.risky) options.push({ method, rates });
   }
   options.sort((a, b) => b.rates.xpPerHour - a.rates.xpPerHour);
   for (const { method, rates } of options) {
@@ -234,17 +257,20 @@ function pickMethod(gd, skill, levels, level, xp, until, stock, index, prev, pre
     const full = runFor(gd, method, level, xp, until);
     if (!full.actions) continue;
     if (best && ((full.hours + switchIn * SWITCH_HOURS) / full.xp) * keep(prefer, method.key) >= best.score) continue;
-    const materials = stock ? rates.inputs.map((i) => obtain(index, stock, i.item, Math.max(full.need.get(i.item) ?? 0, minEach(method, i.item)), 3, prefer)) : [];
+    const materials = stock ? obtainEach(index, stock, rates.inputs.map((i) => ({ item: i.item, qty: Math.max(full.need.get(i.item) ?? 0, minEach(method, i.item)) })), MATERIAL_DEPTH, prefer) : [];
     const gather = materials.reduce((s, m) => s + m.hours, 0);
     const chains = materials.reduce((n, m) => n + (m.short > 0 ? 1 + m.needs.length : 0), 0);
     consider({ rates, ...full, gather, total: full.hours + gather, cost: full.hours + gather + (switchIn + chains) * SWITCH_HOURS, materials });
     if (!chains) continue;
-    // Just as far as the bank lasts, then something else (one more switch).
-    const cap = Math.min(...rates.inputs.map((i) => ((stock.get(i.item) ?? 0) >= minEach(method, i.item) ? Math.floor((stock.get(i.item) ?? 0) / (i.perHour / rates.cyclesPerHour) + 1e-9) : 0)));
+    // Just as far as the bank lasts, then something else (one more switch). `limitedBy` is the material
+    // that runs out first: the run can end part-way through a level.
+    const fits = rates.inputs.map((i) => ({ item: i.item, n: (stock.get(i.item) ?? 0) >= minEach(method, i.item) ? Math.floor((stock.get(i.item) ?? 0) / (i.perHour / rates.cyclesPerHour) + 1e-9) : 0 }));
+    const cap = Math.min(...fits.map((f) => f.n));
     if (cap < 1) continue;
     const part = runFor(gd, method, level, xp, until, cap);
     const fromBank = rates.inputs.map((i) => obtain(index, stock, i.item, Math.min(stock.get(i.item) ?? 0, part.need.get(i.item) ?? 0)));
-    consider({ rates, ...part, gather: 0, total: part.hours, cost: part.hours + (switchIn + 1) * SWITCH_HOURS, materials: fromBank, partial: true });
+    const limitedBy = part.actions >= cap ? fits.find((f) => f.n === cap).item : null;
+    consider({ rates, ...part, gather: 0, total: part.hours, cost: part.hours + (switchIn + 1) * SWITCH_HOURS, materials: fromBank, partial: true, limitedBy });
   }
   return best;
 }
@@ -327,6 +353,8 @@ export function planTraining(gd, skill, levels, xpNow, targetLevel, { bank = nul
     xp += pick.xp;
     level = Math.min(target, gd.xp.levelForXp(xp, gd.levelCap));
     step.toLevel = level;
+    // How the step ends: at a level, or where a material in the bank runs out (the last pick says).
+    step.limitedBy = pick.limitedBy ?? null;
     step.hours += pick.hours;
     step.actions += pick.actions;
     step.xp += pick.xp;
@@ -337,13 +365,54 @@ export function planTraining(gd, skill, levels, xpNow, targetLevel, { bank = nul
     hours,
     trainHours,
     gatherHours,
-    steps,
+    steps: joinRuns(gd, steps, xpNow, target),
     // Anything past what you had came from a gathering step's leftovers, not the bank.
     uses: [...uses].map(([item, qty]) => ({ item, qty: Math.min(qty, start?.get(item) ?? 0), have: start?.get(item) ?? 0 })).filter((u) => u.qty > 0),
     gather,
     blocked: !Number.isFinite(hours),
     endXp: xp,
   };
+}
+
+// One run per method. A plan can leave a method for a short detour (a few of something better while your
+// materials last) and come back to it: Mithril 2H Crossbow × 75, Mithril Spear × 30, Mithril 2H Crossbow
+// × 32. The second run joins the first, with its materials, and the detour follows it, so it's 107 then 30.
+// That's the same actions and XP, and every detour still comes after the level it was picked at. Levels
+// follow the new order.
+function joinRuns(gd, steps, xpNow, target) {
+  const out = [];
+  for (const st of steps) {
+    const same = out.find((x) => x.method.key === st.method.key);
+    if (!same) {
+      out.push(st);
+      continue;
+    }
+    same.actions += st.actions;
+    same.hours += st.hours;
+    same.xp += st.xp;
+    same.limitedBy = st.limitedBy ?? null;
+    for (const g of st.gather) {
+      const have = same.gather.find((x) => x.item === g.item);
+      if (!have) {
+        same.gather.push(g);
+        continue;
+      }
+      for (const k of ['qty', 'hours', 'actions', 'runHours']) have[k] = (have[k] ?? 0) + (g[k] ?? 0);
+      for (const n of g.needs) {
+        const sub = have.needs.find((x) => x.item === n.item);
+        if (sub) for (const k of ['qty', 'hours', 'actions']) sub[k] = (sub[k] ?? 0) + (n[k] ?? 0);
+        else have.needs.push({ ...n });
+      }
+    }
+  }
+  if (out.length === steps.length) return steps;
+  let xp = xpNow;
+  for (const st of out) {
+    st.fromLevel = gd.xp.levelForXp(xp, gd.levelCap);
+    xp += st.xp;
+    st.toLevel = Math.min(target, gd.xp.levelForXp(xp, gd.levelCap));
+  }
+  return out;
 }
 
 export function trainNext(gd, levels, xpBySkill = {}, { bank = null, current = null } = {}) {
