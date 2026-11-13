@@ -65,10 +65,12 @@ function equipNote(ctx, list) {
   }).join('');
 }
 
-function itemHead(ctx, r) {
+// The odds a row shows ("1 in 400 per kill"), right after the item name; lists sort on them.
+function itemHead(ctx, r, chance = '') {
   const status = `${r.on ? ` <span class="pill good">You're on this</span>` : ''}${r.found === true ? ' <span class="pill good">Found</span>' : r.found === false ? ' <span class="pill">Not found yet</span>' : ''}`;
   const have = r.have > 0 ? ` <span class="muted small">you have ${exact(r.have)}</span>` : '';
-  return `${itemLink(ctx, r.item)} ${rarityPill(r.rarity)}${status}${have}`;
+  const odds = chance ? ` <strong class="small">${chance}</strong>` : '';
+  return `${itemLink(ctx, r.item)}${odds} ${rarityPill(r.rarity)}${status}${have}`;
 }
 
 const rarityPill = (b) => `<span class="pill${b.id === 'legendary' ? ' accent' : ''}" title="${esc(b.label)}">${esc(b.name)}</span>`;
@@ -133,28 +135,42 @@ function triesLine(ctx, r, b, rates) {
 // The odds at your level. Thieving loot only rolls on a success, so it's per successful steal there,
 // the same the "so far" line counts.
 function oddsNow(b, pNow, rates) {
-  if (!(pNow > 0)) return `${odds(b.p)} ${per(b)}`;
+  if (!(pNow > 0)) return { p: b.p, text: `${odds(b.p)} ${per(b)}` };
   const s = rates?.successChance;
-  if (b.method?.kind === 'thieving' && s > 0 && s < 1) return `${odds(Math.min(1, pNow / s))} per successful steal at your level (you succeed ${pct(s, 0)} of the time)`;
-  return `${odds(pNow)} ${per(b)} at your level`;
+  if (b.method?.kind === 'thieving' && s > 0 && s < 1) {
+    const p = Math.min(1, pNow / s);
+    return { p, text: `${odds(p)} per successful steal at your level`, note: `you succeed ${pct(s, 0)} of the time` };
+  }
+  return { p: pNow, text: `${odds(pNow)} ${per(b)} at your level` };
 }
 
-function nowRow(ctx, r) {
-  // The source you're on, when it isn't the quickest: that's the one you're working on.
+// The source a "now" row shows and its odds at your level, the same the time is worked out with (the
+// rarity is from the unlock level). The source you're on, when it isn't the quickest: that's the one
+// you're working on.
+function nowOdds(ctx, r) {
   const b = r.onSource?.now ? r.onSource : r.best;
-  // The odds at your level, the same the time is worked out with (the rarity is from the unlock level).
   const rates = b.type === 'method' ? computeRates(ctx.gd, b.method, ctx.gd.levelOf(ctx.levels, b.method.skill)) : null;
   const pNow = rates?.cyclesPerHour ? rates.chancePerCycle?.[r.item] ?? Math.min(1, (rates.outputs.find((o) => o.item === r.item)?.perHour ?? 0) / rates.cyclesPerHour) : 0;
+  return { b, rates, ...oddsNow(b, pNow, rates) };
+}
+
+// Best odds first; ties go to the quicker one.
+const byOdds = (list, odds) => list.map((r) => ({ r, o: odds(r) })).sort((x, y) => y.o.p - x.o.p || (x.r.best?.hours ?? Infinity) - (y.r.best?.hours ?? Infinity)).map((x) => x.r);
+
+function nowRow(ctx, r) {
+  const { b, rates, text, note } = nowOdds(ctx, r);
   const time = b.hours === 0
     ? `<span class="num">${pct(b.chanceFromOwned, b.chanceFromOwned < 0.1 ? 1 : 0)}<span class="sub muted small">from yours</span></span>`
     : `<span class="num">${duration(b.hours)}<span class="sub muted small">${b.kills ? `${exact(b.kills)} kills` : 'for a 50% chance'}</span></span>`;
-  return `${li(r)}<span>${itemHead(ctx, r)}<span class="sub small">${sourceText(ctx, b)} · ${oddsNow(b, pNow, rates)}</span>${triesLine(ctx, r, b, rates)}${b.equip?.length ? equipNote(ctx, b.equip) : ''}${others(ctx, r, b)}</span>${time}</li>`;
+  return `${li(r)}<span>${itemHead(ctx, r, text)}<span class="sub small">${sourceText(ctx, b)}${note ? ` <span class="muted">(${note})</span>` : ''}</span>${triesLine(ctx, r, b, rates)}${b.equip?.length ? equipNote(ctx, b.equip) : ''}${others(ctx, r, b)}</span>${time}</li>`;
 }
 
+const soonSource = (ctx, r) => r.sources.filter((x) => x.needs?.length).sort((a, b) => levelsAway(ctx.gd, { sources: [a] }, ctx.levels) - levelsAway(ctx.gd, { sources: [b] }, ctx.levels))[0];
+
 function soonRow(ctx, r) {
-  const s = r.sources.filter((x) => x.needs?.length).sort((a, b) => levelsAway(ctx.gd, { sources: [a] }, ctx.levels) - levelsAway(ctx.gd, { sources: [b] }, ctx.levels))[0];
+  const s = soonSource(ctx, r);
   const needs = s.needs.map((n) => `${esc(skillName(ctx, n.skill))} ${n.level} <span class="muted">(you're ${ctx.gd.levelOf(ctx.levels, n.skill)})</span>`).join(', ');
-  return `${li(r)}<span>${itemHead(ctx, r)}<span class="sub small">${sourceText(ctx, s)} · ${odds(s.p)} ${per(s)}</span><span class="sub small warn-text">Needs ${needs}</span>${others(ctx, r, s)}</span><span class="num">+${exact(r.away)}<span class="sub muted small">levels</span></span></li>`;
+  return `${li(r)}<span>${itemHead(ctx, r, `${odds(s.p)} ${per(s)}`)}<span class="sub small">${sourceText(ctx, s)}</span><span class="sub small warn-text">Needs ${needs}</span>${others(ctx, r, s)}</span><span class="num">+${exact(r.away)}<span class="sub muted small">levels</span></span></li>`;
 }
 
 // Why something is out of reach, grouped.
@@ -166,11 +182,11 @@ function laterGroups(ctx, list) {
     ['other', 'Need something else first (a quest, a Mastery rank, a tool or a big level jump)'],
   ];
   return groups.map(([id, title]) => {
-    const items = list.filter((r) => why(r) === id);
+    const items = byOdds(list.filter((r) => why(r) === id), (r) => r.sources[0]);
     if (!items.length) return '';
     const line = (r) => {
       const s = r.sources[0];
-      return `${li(r)}<span>${itemHead(ctx, r)}<span class="sub muted small">${sourceText(ctx, s)} · ${odds(s.p)} ${per(s)}</span></span></li>`;
+      return `${li(r)}<span>${itemHead(ctx, r, `${odds(s.p)} ${per(s)}`)}<span class="sub muted small">${sourceText(ctx, s)}</span></span></li>`;
     };
     return `<h4 class="small" style="margin:12px 0 4px">${esc(title)} <span class="muted">· ${exact(items.length)}</span></h4><ul class="list-plain">${items.slice(0, LIST_LIMIT).map(line).join('')}</ul>`;
   }).join('');
@@ -188,12 +204,12 @@ export function rarePage(ctx) {
   const hasFound = all.some((r) => r.found != null);
   const shown = all.filter((r) => (ui.band === 'all' || r.rarity.id === ui.band) && !(ui.missing && r.found));
   // What you're doing gets its own box; the rest go in the lists below it.
-  const onItems = shown.filter((r) => r.on && (r.onSource.now || r.best));
+  const onItems = byOdds(shown.filter((r) => r.on && (r.onSource.now || r.best)), (r) => nowOdds(ctx, r));
   const rest = shown.filter((r) => !onItems.includes(r));
   // Chests you already have are a roll you can make right now, so they get their own list.
-  const inChests = rest.filter((r) => r.best?.type === 'open' && r.best.have > 0).sort((a, b) => b.best.chanceFromOwned - a.best.chanceFromOwned);
-  const now = rest.filter((r) => r.best && !inChests.includes(r)).sort((a, b) => a.best.hours - b.best.hours);
-  const soon = rest.filter((r) => !r.best).map((r) => ({ ...r, away: levelsAway(ctx.gd, r, ctx.levels) })).filter((r) => Number.isFinite(r.away)).sort((a, b) => a.away - b.away);
+  const inChests = byOdds(rest.filter((r) => r.best?.type === 'open' && r.best.have > 0), (r) => nowOdds(ctx, r));
+  const now = byOdds(rest.filter((r) => r.best && !inChests.includes(r)), (r) => nowOdds(ctx, r));
+  const soon = byOdds(rest.filter((r) => !r.best).map((r) => ({ ...r, away: levelsAway(ctx.gd, r, ctx.levels) })).filter((r) => Number.isFinite(r.away)), (r) => soonSource(ctx, r));
   const soonSet = new Set(soon.map((r) => r.item));
   const later = rest.filter((r) => !r.best && !soonSet.has(r.item));
 
@@ -205,13 +221,13 @@ export function rarePage(ctx) {
   const head = pageHead('Rare items', 'Everything you only get by chance: how rare it is, where it comes from, and how long you\'d need for an even chance of one at your levels. Rarity is the best odds any source gives.');
   const basis = ctx.save ? '' : '<p class="notice">Load a save to time enemy drops with your gear and to count the chests you already have.</p>';
   const chestCard = inChests.length
-    ? card(`Open what you have <span class="muted small">· ${exact(inChests.length)}</span>`, `<p class="small muted">Chests and nests already in your bank that can hold one. The chance is for opening all of them; best odds first.</p><ul class="list-plain">${inChests.map((r) => nowRow(ctx, r)).join('')}</ul>`, ' style="margin-bottom:12px"')
+    ? card(`Open what you have <span class="muted small">· ${exact(inChests.length)}</span>`, `<p class="small muted">Chests and nests already in your bank that can hold one. Best odds per chest first; the chance on the right is for opening all of them.</p><ul class="list-plain">${inChests.map((r) => nowRow(ctx, r)).join('')}</ul>`, ' style="margin-bottom:12px"')
     : '';
   const nowCard = card(`You can go for these now <span class="muted small">· ${exact(now.length)}</span>`, now.length
-    ? `<p class="small muted">Quickest first. Times are for a 50% chance of at least one, with your levels and bonuses (and your best gear for enemy drops).</p><ul class="list-plain">${now.slice(0, LIST_LIMIT).map((r) => nowRow(ctx, r)).join('')}</ul>${now.length > LIST_LIMIT ? `<p class="small muted">And ${exact(now.length - LIST_LIMIT)} more slower ones. Pick a rarity above to narrow it down.</p>` : ''}`
+    ? `<p class="small muted">Best odds first. Times are for a 50% chance of at least one, with your levels and bonuses (and your best gear for enemy drops).</p><ul class="list-plain">${now.slice(0, LIST_LIMIT).map((r) => nowRow(ctx, r)).join('')}</ul>${now.length > LIST_LIMIT ? `<p class="small muted">And ${exact(now.length - LIST_LIMIT)} more with worse odds. Pick a rarity above to narrow it down.</p>` : ''}`
     : '<p class="muted small">Nothing here you can go for yet.</p>');
   const soonCard = card(`A few levels away <span class="muted small">· ${exact(soon.length)}</span>`, soon.length
-    ? `<p class="small muted">Fewest levels first.</p><ul class="list-plain">${soon.slice(0, LIST_LIMIT).map((r) => soonRow(ctx, r)).join('')}</ul>`
+    ? `<p class="small muted">Best odds first.</p><ul class="list-plain">${soon.slice(0, LIST_LIMIT).map((r) => soonRow(ctx, r)).join('')}</ul>`
     : '<p class="muted small">Nothing is only levels away.</p>');
   const laterCard = later.length
     ? `<section class="card" style="margin-top:12px"><details class="row-detail"><summary><strong>Out of reach for now</strong> <span class="muted small">· ${exact(later.length)}</span></summary>${laterGroups(ctx, later)}</details></section>`
